@@ -1,0 +1,81 @@
+name: scan
+
+# Madrid'den ~90 şehir grubuna hedef pencereler için gidiş/dönüş fiyatlarını tarar (fli = Google Flights).
+# Her pencere 4 shard'a bölünür, her shard ayrı runner (ayrı IP) üzerinde çalışır. Sonuç "data" release'ine yüklenir.
+on:
+  schedule:
+    - cron: '5 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      window:
+        description: 'Sadece bu pencere (örn. 2026-11-13); boşsa hepsi'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scan
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          t = json.load(open("targets.json"))
+          only = "${{ github.event.inputs.window }}"
+          inc = [{"window": w["id"], "shard": s} for w in t["windows"] if not only or w["id"] == only for s in range(t["shards"])]
+          print("matrix=" + json.dumps({"include": inc}))
+          PY
+
+  scan:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install fli (pinned)
+        run: pip install "git+https://github.com/punitarani/fli.git@881aee5ff4321e81ea2157cb44be94ce6a21dc1b" click
+      - name: Scan shard
+        run: python3 collect.py --window "${{ matrix.window }}" --shard "${{ matrix.shard }}" --of 4 --out out
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scan-${{ matrix.window }}-${{ matrix.shard }}
+          path: out/
+          retention-days: 2
+
+  merge:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: scan-*
+          path: shards
+      - name: Merge
+        run: python3 merge.py shards latest
+      - name: Publish to release "data"
+        run: |
+          gh release view data >/dev/null 2>&1 || gh release create data --title "data" --notes "Latest scan data (overwritten each scan)" --prerelease
+          ls latest/*.json >/dev/null 2>&1 && gh release upload data latest/*.json --clobber
+          echo "published: $(ls latest | tr '\n' ' ')"
