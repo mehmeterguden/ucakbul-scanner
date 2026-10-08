@@ -1,0 +1,57 @@
+name: window
+
+# Tek bir hedef pencerenin taraması: 8 shard paralel (ayrı runner/IP), bitince bu pencere TEK BAŞINA yayınlanır.
+on:
+  workflow_call:
+    inputs:
+      window:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install fli (pinned)
+        run: pip install "git+https://github.com/punitarani/fli.git@881aee5ff4321e81ea2157cb44be94ce6a21dc1b" click
+      - name: Scan shard
+        run: python3 collect.py --window "${{ inputs.window }}" --shard "${{ matrix.shard }}" --of 8 --out out
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scan-${{ inputs.window }}-${{ matrix.shard }}
+          path: out/
+          retention-days: 2
+
+  publish:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: scan-${{ inputs.window }}-*
+          path: shards
+      - name: Merge this window
+        run: python3 merge.py shards latest
+      - name: Publish to release "data"
+        run: |
+          gh release view data >/dev/null 2>&1 || gh release create data --title "data" --notes "Latest scan data (overwritten each scan)" --prerelease
+          ls latest/*.json >/dev/null 2>&1 && gh release upload data latest/*.json --clobber
+          echo "published: $(ls latest | tr '\n' ' ')"

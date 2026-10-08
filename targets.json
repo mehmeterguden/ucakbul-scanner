@@ -40,7 +40,7 @@
    "ret_time": "15-23"
   }
  ],
- "shards": 4,
+ "shards": 8,
  "groups": {
   "Paris": "CDG,ORY,BVA",
   "Amsterdam": "AMS,EIN",
